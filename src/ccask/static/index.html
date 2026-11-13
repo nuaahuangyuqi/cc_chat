@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>CC Ask · 项目工作台</title>
+    <link rel="icon" href="/static/icon.png" />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="desktop-drag-region pywebview-drag-region" aria-hidden="true"></div>
+    <aside class="sidebar">
+      <a class="brand" href="#/projects"
+        ><span class="brand-mark" data-icon="brand"></span
+        ><span>CC Ask</span></a
+      >
+      <div class="nav-section">工作空间</div>
+      <nav class="nav" aria-label="主导航">
+        <a href="#/projects" data-nav="projects"
+          ><span data-icon="grid"></span>项目工作台<span
+            class="count"
+            id="nav-count"
+            >0</span
+          ></a
+        ><a href="#/python" data-nav="python"
+          ><span data-icon="code"></span>Python 调用</a
+        ><a href="#/connections" data-nav="connections"
+          ><span data-icon="plug"></span>连接管理</a
+        ><a href="#/settings" data-nav="settings"
+          ><span data-icon="sliders"></span>设置</a
+        >
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="connection-mini" id="connection-mini">
+          <div><span class="dot"></span>正在读取 CC Switch</div>
+          <small>所有模型调用的统一出口</small>
+        </div>
+      </div>
+    </aside>
+    <div class="shell">
+      <section
+        class="page-context"
+        id="page-context"
+        aria-label="页面标题与筛选"
+      ></section>
+      <div
+        class="workspace-scroll"
+        id="workspace-scroll"
+        tabindex="0"
+        aria-label="主要内容"
+      >
+        <main class="content" id="app"></main>
+      </div>
+    </div>
+    <dialog id="dialog"></dialog>
+    <div id="toast" role="status" hidden></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

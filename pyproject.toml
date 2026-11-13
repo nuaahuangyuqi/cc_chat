@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ccask"
+version = "0.1.1"
+description = "Local Python conversations and project usage dashboard for CC Switch"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "uvicorn>=0.34,<1",
+]
+
+[project.scripts]
+ccask = "ccask.cli:main"
+
+[dependency-groups]
+desktop = [
+    "pillow>=11,<13",
+    "pyinstaller>=6.16,<7",
+    "pywebview>=6,<7",
+]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2", "ruff>=0.11,<1"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "release/mac/src"]
+
+[tool.ruff.lint.per-file-ignores]
+# The standalone client is also installed on Python 3.7.
+"src/ccask/client.py" = ["UP007", "UP045"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ccask", "release/mac/src/ccask_mac"]
