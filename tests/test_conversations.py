@@ -20,13 +20,13 @@ async def test_memory_pause_resume_clear_and_restart(env):
     first = await s.ask(sid, content("remember my topic"))
     assert first["text"] == "answer-1"
     await s.ask(sid, content("continue"))
-    assert any(i.get("type") == "reasoning" for i in env.calls[-1]["body"]["input"])
+    assert not any(i.get("type") == "reasoning" for i in env.calls[-1]["body"]["input"])
     await s.set_memory(sid, False)
     await s.ask(sid, content("unrelated"))
     assert len(env.calls[-1]["body"]["input"]) == 1
     await s.set_memory(sid, True)
     await s.ask(sid, content("back to topic"))
-    assert "unrelated" not in json.dumps(env.calls[-1]["body"]["input"])
+    assert "unrelated" in json.dumps(env.calls[-1]["body"]["input"])
     restored = env.db.session("研究", "experiment", True)
     assert restored["id"] == sid
     request_count = len(env.db.rows("SELECT * FROM requests"))
@@ -126,7 +126,7 @@ async def test_clear_waits_for_inflight_answer(env):
 async def test_same_session_serializes_and_separate_sessions_can_run(env):
     sid = env.session["id"]
     await asyncio.gather(env.service.ask(sid, content("one")), env.service.ask(sid, content("two")))
-    assert len(env.calls[-1]["body"]["input"]) == 4  # user, reasoning, answer, user
+    assert len(env.calls[-1]["body"]["input"]) == 3  # previous user, previous answer, current user
     other = env.db.session("研究", None, False)
     await asyncio.gather(
         env.service.ask(sid, content("three")), env.service.ask(other["id"], content("independent"))
@@ -189,3 +189,83 @@ async def test_cancelled_call_leaves_memory_unchanged_and_releases_queue(env):
     assert env.db.one("SELECT status FROM requests")["status"] == "interrupted"
     assert not env.db.rows("SELECT * FROM messages")
     assert not env.service.locks._entries
+
+
+async def test_memory_window_rolls_forward_and_can_read_saved_independent_rounds(env):
+    sid = env.session["id"]
+    await env.service.set_memory(sid, 0)
+    for i in range(4):
+        await env.service.ask(sid, content(f"question-{i}"))
+        assert env.calls[-1]["body"]["input"] == [{"role": "user", "content": content(f"question-{i}")}]
+    assert len(env.db.rows("SELECT * FROM messages")) == 8
+    await env.service.set_memory(sid, 2)
+    await env.service.ask(sid, content("question-4"))
+    assert env.calls[-1]["body"]["input"] == [
+        {"role": "user", "content": content("question-2")},
+        {"role": "assistant", "content": "answer-3"},
+        {"role": "user", "content": content("question-3")},
+        {"role": "assistant", "content": "answer-4"},
+        {"role": "user", "content": content("question-4")},
+    ]
+    await env.service.ask(sid, content("question-5"))
+    window = env.calls[-1]["body"]["input"]
+    assert len(window) == 5
+    assert window[0]["content"] == content("question-3")
+    reopened = Database(env.settings.db_path)
+    assert reopened.get_session(sid)["memory_rounds"] == 2
+    await env.service.clear(sid)
+    assert env.db.get_session(sid)["memory_rounds"] == 2
+    await env.service.ask(sid, content("fresh"))
+    assert len(env.calls[-1]["body"]["input"]) == 1
+
+
+async def test_legacy_true_is_bounded_and_sessions_are_isolated(env):
+    sid = env.session["id"]
+    for i in range(13):
+        await env.service.ask(sid, content(f"turn-{i}"))
+    window = env.calls[-1]["body"]["input"]
+    assert len(window) == 21
+    assert window[0]["content"] == content("turn-2")
+    other = env.db.session(env.project["id"], "other", 10)
+    await env.service.ask(other["id"], content("separate"))
+    assert len(env.calls[-1]["body"]["input"]) == 1
+    assert len(env.db.rows("SELECT * FROM messages WHERE session_id=?", (sid,))) == 26
+
+
+async def test_old_encrypted_state_is_not_replayed(env):
+    sid = env.session["id"]
+    await env.service.ask(sid, content("first"))
+    env.db.execute(
+        "UPDATE messages SET raw_output=? WHERE role='assistant'",
+        (json.dumps([{"type": "reasoning", "encrypted_content": "old-secret-state"}]),),
+    )
+    await env.service.ask(sid, content("second"))
+    window = env.calls[-1]["body"]["input"]
+    assert window[1] == {"role": "assistant", "content": "answer-1"}
+    assert "old-secret-state" not in json.dumps(window)
+
+
+def test_memory_migration_preserves_history_and_is_idempotent(env):
+    path = env.settings.data_dir / "legacy.db"
+    with sqlite3.connect(path) as c:
+        from ccask.db import SCHEMA
+
+        c.executescript(SCHEMA.replace(" memory_rounds INTEGER NOT NULL DEFAULT 0,\n", ""))
+        c.execute("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+        c.execute(
+            "INSERT INTO projects(id,name,mode,model,created_at,updated_at) "
+            "VALUES ('p','legacy','gpt','model',1,1)"
+        )
+        c.execute("INSERT INTO sessions VALUES ('on','p','on',1,0,1)")
+        c.execute("INSERT INTO sessions VALUES ('off','p','off',0,0,1)")
+        c.execute("INSERT INTO messages VALUES (1,'on',0,'user','[]',NULL,NULL,'r',1)")
+    db = Database(path)
+    assert db.get_session("on")["memory_rounds"] == 10
+    assert db.get_session("off")["memory_rounds"] == 0
+    assert len(db.rows("SELECT * FROM messages")) == 1
+    db.execute("UPDATE sessions SET memory_rounds=3 WHERE id='on'")
+    assert Database(path).get_session("on")["memory_rounds"] == 3
+    backups = list((path.parent / "backups").glob("*.db"))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as c:
+        assert "memory_rounds" not in {r[1] for r in c.execute("PRAGMA table_info(sessions)")}

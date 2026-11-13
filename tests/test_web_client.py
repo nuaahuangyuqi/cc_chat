@@ -63,7 +63,7 @@ def test_project_description_and_connection_test_usage(env):
         assert report["currency"] == "USD"
         assert report["rollups"][0]["provider_id"] == "api-one"
         assert report["rollups"][0]["cost"] == "0.0023"
-        assert not env.db.rows("SELECT * FROM messages")
+        assert len(env.db.rows("SELECT * FROM messages")) == 2
         assert c.post("/api/projects/missing/test").status_code == 404
 
 
@@ -104,17 +104,26 @@ def test_sdk_memory_and_image_against_real_service_routes(env, monkeypatch):
                 base_url="http://testserver", transport=httpx.MockTransport(forward)
             ),
         )
-        with Ask("研究", memory=True, session_id="sdk") as bot:
+        with Ask("研究", memory=2, session_id="sdk") as bot:
             reply = bot.ask("image", images=[PNG])
             assert reply.text == "answer-1"
             assert reply.session_id == "sdk"
             assert env.calls[-1]["body"]["input"][0]["content"][1]["type"] == "input_image"
+            assert bot.memory == 2
             bot.stop_memory()
+            assert bot.memory == 0
             bot.ask("independent")
             assert len(env.calls[-1]["body"]["input"]) == 1
             bot.start_memory()
+            assert bot.memory == 2
             bot.ask("continue")
-            assert "independent" not in json.dumps(env.calls[-1]["body"]["input"])
+            assert "independent" in json.dumps(env.calls[-1]["body"]["input"])
+            bot.set_memory(1)
+            bot.ask("one round")
+            assert len(env.calls[-1]["body"]["input"]) == 3
+            assert env.calls[-1]["body"]["input"][0]["content"][0]["text"] == "continue"
+            bot.start_memory(3)
+            assert bot.memory == 3
             bot.clear_memory()
             assert not env.db.rows("SELECT * FROM messages")
 
@@ -149,7 +158,7 @@ def test_delete_project_removes_usage_and_memory_but_preserves_other_projects(en
         assert report["summary"]["total_tokens"] == 1100
         assert report["summary"]["cost"] == "0.0023"
         assert {r["project_id"] for r in report["rollups"]} == {other}
-        assert not env.db.rows("SELECT * FROM messages")
+        assert len(env.db.rows("SELECT * FROM messages")) == 2
         assert not env.db.rows("SELECT * FROM sessions WHERE project_id=?", (original,))
         assert not env.db.rows("SELECT * FROM requests WHERE project_id=?", (original,))
         assert len(env.db.rows("SELECT * FROM connections")) == 1
@@ -238,3 +247,64 @@ def test_current_catalog_wins_over_old_account_cache(env):
         )
     )
     assert [m["id"] for m in env.cc.catalog()] == ["current-model"]
+
+
+@pytest.mark.parametrize("memory", [-1, 1.5, "10", None, [], {}, 2**31])
+def test_invalid_memory_rejected_by_sdk_and_api(env, memory):
+    with pytest.raises(CCAskError) as info:
+        Ask("研究", memory=memory)
+    assert info.value.code == "invalid_memory"
+    with TestClient(create_app(env.settings, env.service)) as c:
+        assert c.post("/api/sessions", json={"project": "研究", "memory": memory}).status_code == 422
+        assert c.put(
+            f"/api/sessions/{env.session['id']}/memory", json={"memory": memory}
+        ).status_code == 422
+    assert env.db.get_session(env.session["id"])["memory_rounds"] == 10
+
+
+def test_memory_api_defaults_legacy_clients_and_named_session_reconfiguration(env):
+    with TestClient(create_app(env.settings, env.service)) as c:
+        session = c.post("/api/sessions", json={"project": "研究", "session_id": "default"}).json()
+        assert session["memory_rounds"] == 0
+        assert session["memory_enabled"] == 0
+        url = f"/api/sessions/{session['id']}/memory"
+        assert c.put(url, json={"enabled": True}).json()["memory_rounds"] == 10
+        assert c.put(url, json={"enabled": False}).json()["memory_rounds"] == 0
+        changed = c.post(
+            "/api/sessions", json={"project": "研究", "session_id": "default", "memory": 3}
+        ).json()
+        assert changed["id"] == session["id"]
+        assert changed["memory_rounds"] == 3
+        assert c.put(url, json={}).status_code == 422
+
+
+def test_images_leave_context_with_their_round(env):
+    with TestClient(create_app(env.settings, env.service)) as c:
+        sid = c.post("/api/sessions", json={"project": "研究", "memory": 1}).json()["id"]
+        image = {"type": "input_image", "image_url": image_content(PNG)["image_url"]}
+        c.post(f"/api/sessions/{sid}/ask", json={"content": [image]})
+        c.post(
+            f"/api/sessions/{sid}/ask", json={"content": [{"type": "input_text", "text": "second"}]}
+        )
+        assert env.calls[-1]["body"]["input"][0]["content"] == [image]
+        c.post(
+            f"/api/sessions/{sid}/ask", json={"content": [{"type": "input_text", "text": "third"}]}
+        )
+        assert "input_image" not in json.dumps(env.calls[-1]["body"]["input"])
+        assert len(env.db.rows("SELECT * FROM messages WHERE session_id=?", (sid,))) == 6
+
+
+def test_sdk_requires_service_with_window_support(monkeypatch):
+    original_client = httpx.Client
+    monkeypatch.setattr(
+        "ccask.client.httpx.Client",
+        lambda **kw: original_client(
+            base_url="http://testserver",
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(201, json={"id": "old", "name": "old", "memory_enabled": 0})
+            ),
+        ),
+    )
+    with pytest.raises(CCAskError) as info:
+        Ask("研究")
+    assert info.value.code == "service_upgrade_required"

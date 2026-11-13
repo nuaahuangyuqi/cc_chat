@@ -10,10 +10,11 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import __version__
+from .client import normalize_memory
 from .config import Settings
 from .db import Database
 from .errors import CCAskError
@@ -69,14 +70,26 @@ class ProjectDraft(BaseModel):
         return self
 
 
-class SessionDraft(BaseModel):
+class MemoryWindow(BaseModel):
+    memory: int = Field(default=0, ge=0, le=2**31 - 1)
+
+    @field_validator("memory", mode="before")
+    @classmethod
+    def validate_memory(cls, value):
+        try:
+            return normalize_memory(value)
+        except CCAskError as exc:
+            raise ValueError(str(exc)) from exc
+
+
+class SessionDraft(MemoryWindow):
     project: str = Field(min_length=1, max_length=200)
-    memory: bool = False
     session_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
-class MemoryDraft(BaseModel):
-    enabled: bool
+class MemoryDraft(MemoryWindow):
+    # Accept old clients' {"enabled": true}, but always use a bounded window.
+    memory: int = Field(ge=0, le=2**31 - 1, validation_alias=AliasChoices("memory", "enabled"))
 
 
 class RuntimeDraft(BaseModel):
@@ -257,7 +270,7 @@ def create_app(settings=None, service=None):
 
     @app.put("/api/sessions/{session_id}/memory")
     async def memory(session_id: str, draft: MemoryDraft):
-        return await service.set_memory(session_id, draft.enabled)
+        return await service.set_memory(session_id, draft.memory)
 
     @app.post("/api/sessions/{session_id}/clear")
     async def clear(session_id: str):

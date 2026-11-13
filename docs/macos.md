@@ -1,6 +1,6 @@
 # CC Ask macOS 桌面版
 
-发布包：`release/mac/CC-Ask-0.1.1-macos-arm64.zip`。解压，将 `CC Ask.app` 拖入“应用程序”，双击打开。桌面版已内置 Python 3.12 和依赖，日常打开 App 无需终端、Python 或 uv。
+发布包：`release/mac/CC-Ask-0.1.2-macos-arm64.zip`。解压，将 `CC Ask.app` 拖入“应用程序”，双击打开。桌面版已内置 Python 3.12 和依赖，日常打开 App 无需终端、Python 或 uv。
 
 当前发布包适用于 Apple Silicon（arm64），最低系统版本设置为 macOS 14；实际验证机器为 arm64 / macOS 27.2。Intel Mac 需在 Intel 机器重新构建，本包不是 universal 应用。采用本地 ad-hoc 签名。
 
@@ -15,14 +15,14 @@ CC Switch 的账号、供应商、聚合、代理和请求日志由 CC Switch �
 先打开 App，再在对应 Python 3.7+ 环境安装一次：
 
 ```sh
-NO_PROXY=127.0.0.1,localhost python -m pip install --upgrade "http://127.0.0.1:8765/api/sdk/ccask_client-0.1.1-py3-none-any.whl"
+NO_PROXY=127.0.0.1,localhost python -m pip install --upgrade "http://127.0.0.1:8765/api/sdk/ccask_client-0.1.2-py3-none-any.whl"
 ```
 
 Python 调用页的安装框右上角有“复制安装命令”按钮。该 wheel 内只有 Ask 客户端、错误类型和依赖声明，无需源码目录。若原环境装过开发版 `ccask`，先在新虚拟环境使用客户端，避免同名模块混装。客户端在 Python 3.7 使用 HTTPX 0.24.1 系列，在较新 Python 上使用 HTTPX 0.28+，pip 会自动选择对应依赖。App 的内置服务和源码开发环境使用 Python 3.12。
 
 ```python
 from ccask import Ask
-with Ask("你的项目名", memory=True, session_id="日常会话") as bot:
+with Ask("你的项目名", memory=10, session_id="日常会话") as bot:
     print(bot.ask("你好").text)
 ```
 
@@ -60,3 +60,7 @@ uv run python release/mac/scripts/verify_macos.py --data-dir '/tmp/CC Ask 验证
 ```
 
 fixture 只在本机动态端口返回模拟 SSE，既不读取真实凭据，也不访问模型。停止 fixture 可检验代理离线；启动前将 CCASK_CC_DIR 指向不存在的临时目录，可检验缺失配置。App 本身的健康检查不依赖 CC Switch。
+
+## Python 客户端完整说明
+
+见 [Python 客户端使用说明](python-client.md)，包含 `memory=0` / `memory=10`、会话恢复、图片、异常处理和 0.1.1 升级说明。升级时先替换并重启 App，再安装新版客户端。

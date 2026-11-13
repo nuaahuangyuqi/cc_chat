@@ -102,6 +102,7 @@ def test_distributed_client_has_python37_compatible_source_and_dependencies(env)
         assert 'httpx>=0.24.1,<0.25; python_version < "3.8"' in metadata.get_all("Requires-Dist")
         for name in ("ccask/__init__.py", "ccask/client.py", "ccask/errors.py"):
             ast.parse(wheel.read(name), feature_version=(3, 7))
+            assert wheel.read(name) == (sdk.parents[1] / name.split("/", 1)[1]).read_bytes()
     with TestClient(create_app(env.settings, env.service)) as client:
         setup = client.get("/api/setup").json()
         assert setup["install_command"] == install_command()

@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
+from .client import normalize_memory
 from .errors import CCAskError
 
 
@@ -29,6 +30,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS projects_name ON projects(name) WHERE archived
 CREATE TABLE IF NOT EXISTS sessions (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL,
  memory_enabled INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0,
+ memory_rounds INTEGER NOT NULL DEFAULT 0,
  created_at REAL NOT NULL, UNIQUE(project_id,name)
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -36,6 +38,7 @@ CREATE TABLE IF NOT EXISTS messages (
  role TEXT NOT NULL, content TEXT NOT NULL, raw_output TEXT, connection_version TEXT,
  request_id TEXT NOT NULL, created_at REAL NOT NULL
 );
+CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id, id);
 CREATE TABLE IF NOT EXISTS connections (
  id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, provider_name TEXT NOT NULL,
  account_id TEXT, account_label TEXT, fingerprint TEXT NOT NULL, created_at REAL NOT NULL,
@@ -67,10 +70,13 @@ class Database:
             # Backup with SQLite's online API so WAL contents are included before migration.
             with sqlite3.connect(path) as source:
                 columns = {r[1] for r in source.execute("PRAGMA table_info(projects)")}
-                if columns and "description" not in columns:
+                sessions = {r[1] for r in source.execute("PRAGMA table_info(sessions)")}
+                if columns and (
+                    "description" not in columns or (sessions and "memory_rounds" not in sessions)
+                ):
                     backup_dir = path.parent / "backups"
                     backup_dir.mkdir(exist_ok=True, mode=0o700)
-                    backup = backup_dir / f"ccask-before-description-{time.time_ns()}.db"
+                    backup = backup_dir / f"ccask-before-migration-{time.time_ns()}.db"
                     with sqlite3.connect(backup) as target:
                         source.backup(target)
                     backup.chmod(0o600)
@@ -80,6 +86,10 @@ class Database:
             columns = {row[1] for row in c.execute("PRAGMA table_info(projects)")}
             if "description" not in columns:
                 c.execute("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+            columns = {row[1] for row in c.execute("PRAGMA table_info(sessions)")}
+            if "memory_rounds" not in columns:
+                c.execute("ALTER TABLE sessions ADD COLUMN memory_rounds INTEGER NOT NULL DEFAULT 0")
+                c.execute("UPDATE sessions SET memory_rounds=10 WHERE memory_enabled=1")
             c.execute(
                 "INSERT OR IGNORE INTO metadata VALUES ('fingerprint_salt', ?)",
                 (secrets.token_hex(32),),
@@ -176,13 +186,16 @@ class Database:
             raise CCAskError("项目名已经存在。", "project_name_exists", 409) from exc
         return self.project(project_id)
 
-    def session(self, project: str, name: str | None, memory: bool):
+    def session(self, project: str, name: str | None, memory: int = 0):
+        memory = normalize_memory(memory)
         p = self.project(project)
         name = name or uid()
         with self.connect() as c:
             c.execute(
-                "INSERT OR IGNORE INTO sessions VALUES (?,?,?,?,0,?)",
-                (uid(), p["id"], name, int(memory), time.time()),
+                "INSERT OR IGNORE INTO sessions"
+                "(id,project_id,name,memory_enabled,generation,memory_rounds,created_at) "
+                "VALUES (?,?,?,?,0,?,?)",
+                (uid(), p["id"], name, int(memory > 0), memory, time.time()),
             )
             row = dict(
                 c.execute(

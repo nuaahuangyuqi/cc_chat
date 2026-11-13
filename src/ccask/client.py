@@ -28,6 +28,18 @@ def image_content(value: Union[str, Path, bytes]) -> dict:
     }
 
 
+DEFAULT_MEMORY_ROUNDS = 10
+
+
+def normalize_memory(memory):
+    """Validate a history window; legacy booleans map to 10 or 0 rounds."""
+    if isinstance(memory, bool):
+        return DEFAULT_MEMORY_ROUNDS if memory else 0
+    if not isinstance(memory, int) or not 0 <= memory <= 2**31 - 1:
+        raise CCAskError("memory 须为非负整数，表示带入的最近问答轮数。", "invalid_memory")
+    return memory
+
+
 @dataclass(frozen=True)
 class Reply:
     text: str
@@ -44,12 +56,14 @@ class Ask:
     def __init__(
         self,
         project: str,
-        memory: bool = False,
+        memory: int = 0,
         session_id: Optional[str] = None,
         *,
         base_url: Optional[str] = None,
         timeout: float = 240,
     ):
+        memory = normalize_memory(memory)
+        self._resume_memory = memory or DEFAULT_MEMORY_ROUNDS
         self.base_url = base_url or os.environ.get("CCASK_URL", "http://127.0.0.1:8765")
         u = urlparse(self.base_url)
         if u.scheme != "http" or u.hostname not in {"127.0.0.1", "localhost", "::1"}:
@@ -68,8 +82,11 @@ class Ask:
             self._id = state["id"]
             self.session_id = state["name"]
             self.memory = memory
-            if bool(state["memory_enabled"]) != memory:
-                self._set_memory(memory)
+            if "memory_rounds" not in state:
+                raise CCAskError(
+                    "请先将 CC Ask App 或本地服务升级到 0.1.2，再使用新版客户端。",
+                    "service_upgrade_required",
+                )
         except BaseException:
             self._http.close()
             raise
@@ -102,15 +119,21 @@ class Ask:
             **self._call("POST", f"/api/sessions/{self._id}/ask", json={"content": content})
         )
 
-    def _set_memory(self, enabled):
-        self._call("PUT", f"/api/sessions/{self._id}/memory", json={"enabled": enabled})
-        self.memory = enabled
+    def set_memory(self, memory: int):
+        """Set the number of recent completed rounds included in each request."""
+        memory = normalize_memory(memory)
+        self._call("PUT", f"/api/sessions/{self._id}/memory", json={"memory": memory})
+        self.memory = memory
+        if memory:
+            self._resume_memory = memory
 
-    def start_memory(self):
-        self._set_memory(True)
+    def start_memory(self, rounds: Optional[int] = None):
+        """Resume the last positive window (10 initially), or choose a new window."""
+        self.set_memory(self._resume_memory if rounds is None else rounds)
 
     def stop_memory(self):
-        self._set_memory(False)
+        """Send only the current question; successful rounds are still saved."""
+        self.set_memory(0)
 
     def clear_memory(self):
         self._call("POST", f"/api/sessions/{self._id}/clear")

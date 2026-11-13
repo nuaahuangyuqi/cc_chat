@@ -144,7 +144,7 @@ function emptyProject(p) {
   return `<div class="empty-state space-top">${icon("activity")}<h3>准备好接收第一次调用</h3><p>完成项目配置并测试连接后，可从左侧 Python 调用页面查看使用方式。</p><a class="btn secondary" href="#/project/${esc(p.id)}/settings">${icon("settings")}配置项目</a></div>`;
 }
 function codeText(p) {
-  return `from ccask import Ask\n\nwith Ask(\n    project=${JSON.stringify(p.name)},\n    memory=True,\n    session_id="我的会话",\n) as bot:\n    reply = bot.ask("你好，请帮我分析这个问题")\n    print(reply.text)\n\n    # 也可以传入图片\n    reply = bot.ask("分析这张图", images=["figure.png"])\n\n    bot.stop_memory()   # 关闭记忆，独立回答\n    bot.start_memory()  # 恢复之前的会话\n    bot.clear_memory()  # 清空记忆，保留用量记录`;
+  return `from ccask import Ask\n\nwith Ask(\n    project=${JSON.stringify(p.name)},\n    memory=10,\n    session_id="我的会话",\n) as bot:\n    reply = bot.ask("你好，请帮我分析这个问题")\n    print(reply.text)\n\n    # 也可以传入图片\n    reply = bot.ask("分析这张图", images=["figure.png"])\n\n    bot.stop_memory()   # 只发送当前问题，问答仍保存\n    bot.start_memory()  # 恢复最近 10 轮历史\n    bot.clear_memory()  # 清空记忆，保留用量记录`;
 }
 function codePage(p) {
   return `<div class="code-layout"><div class="code-window"><div class="code-caption"><span class="mono">${esc(p.name)} / quickstart.py</span><button class="btn secondary small" data-action="copy-code" data-id="${esc(p.id)}">${icon("copy")}复制代码</button></div><pre>${esc(codeText(p))}</pre></div><aside class="instruction-box"><h2>调用前，确认这几件事</h2><ul><li>${icon("check")}CC Ask 本地服务已启动。</li><li>${icon("check")}CC Switch 已启用聚合模式。</li><li>${icon("check")}项目模型已选择，并通过连接测试。</li><li>${icon("info")}相同项目名与会话名，可恢复之前的记忆。</li></ul><div class="callout space-top">项目配置保存在网页，Python 只需传入项目名。切换模型或当前账号后，下一次调用自动使用新配置。</div></aside></div>`;
@@ -355,7 +355,7 @@ function pythonPage() {
   return `<div class="python-install"><div class="python-install-heading"><h2>安装本地库</h2><button class="btn secondary small" data-action="copy-install">${icon("copy")}复制安装命令</button></div><p>支持 Python 3.7 及以上版本。在你的 Python 环境中安装后，保持 CC Ask 服务运行。</p><code>${esc(installCommand())}</code></div>${example}${footer()}`;
 }
 function installCommand() {
-  return state.setup?.install_command || `NO_PROXY=127.0.0.1,localhost python -m pip install --upgrade "http://127.0.0.1:8765/api/sdk/${state.setup?.sdk_wheel || "ccask_client-0.1.1-py3-none-any.whl"}"`;
+  return state.setup?.install_command || `NO_PROXY=127.0.0.1,localhost python -m pip install --upgrade "http://127.0.0.1:8765/api/sdk/${state.setup?.sdk_wheel || "ccask_client-0.1.2-py3-none-any.whl"}"`;
 }
 function settingsPage() {
   const config = state.setup?.menubar || {project_ids: [], period: "today"};

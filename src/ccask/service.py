@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 from .auth import CodexAuth
 from .ccswitch import CCSwitch
-from .client import image_content
+from .client import image_content, normalize_memory
 from .config import Settings
 from .db import Database, dumps, uid
 from .errors import CCAskError
@@ -73,13 +73,15 @@ class ConversationService:
         self.transport = transport or ProxyTransport(settings.timeout)
         self.locks = SessionLocks()
 
-    async def set_memory(self, session_id, enabled):
+    async def set_memory(self, session_id, memory):
+        memory = normalize_memory(memory)
         async with self.locks.hold(session_id):
             self.db.get_session(session_id)
             self.db.execute(
-                "UPDATE sessions SET memory_enabled=? WHERE id=?", (int(enabled), session_id)
+                "UPDATE sessions SET memory_enabled=?,memory_rounds=? WHERE id=?",
+                (int(memory > 0), memory, session_id),
             )
-            return {"memory_enabled": enabled}
+            return {"memory_enabled": memory > 0, "memory_rounds": memory}
 
     async def clear(self, session_id):
         async with self.locks.hold(session_id):
@@ -130,7 +132,7 @@ class ConversationService:
                     "UPDATE requests SET snapshot=?,connection_version=? WHERE id=?",
                     (dumps(snapshot), connection, request_id),
                 )
-                # Native encrypted state is reusable only for the same identity, model and generation.
+                # Keep cache prefixes scoped to the same connection and project configuration.
                 context_key = hashlib.sha256(
                     dumps(
                         [
@@ -143,18 +145,21 @@ class ConversationService:
                     ).encode()
                 ).hexdigest()
                 history = []
-                if session["memory_enabled"]:
+                if session["memory_rounds"]:
+                    # Successful rounds are committed as pairs in one transaction. Fetch
+                    # the newest N pairs, then restore chronological order. Replay only
+                    # visible messages: opaque reasoning may carry older state outside
+                    # the selected window.
                     rows = self.db.rows(
-                        "SELECT * FROM messages WHERE session_id=? ORDER BY id", (session_id,)
+                        "SELECT role,content FROM (SELECT id,role,content FROM messages "
+                        "WHERE session_id=? AND generation=? ORDER BY id DESC LIMIT ?) "
+                        "ORDER BY id",
+                        (session_id, session["generation"], 2 * session["memory_rounds"]),
                     )
-                    same_context = all(row["connection_version"] == context_key for row in rows)
-                    for row in rows:
-                        if row["role"] == "assistant" and row["raw_output"] and same_context:
-                            history.extend(json.loads(row["raw_output"]))
-                        else:
-                            history.append(
-                                {"role": row["role"], "content": json.loads(row["content"])}
-                            )
+                    history = [
+                        {"role": row["role"], "content": json.loads(row["content"])}
+                        for row in rows
+                    ]
                 history.append({"role": "user", "content": content})
                 body = {
                     **project["parameters"],
@@ -184,25 +189,21 @@ class ConversationService:
                     raise CCAskError("模型没有返回文字回答。", "empty_response", 502)
                 now = time.time()
                 with self.db.connect() as c:
-                    if session["memory_enabled"]:
-                        for role, message, raw in [
-                            ("user", content, None),
-                            ("assistant", text, dumps(output["output"])),
-                        ]:
-                            c.execute(
-                                "INSERT INTO messages(session_id,generation,role,content,raw_output,"
-                                "connection_version,request_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
-                                (
-                                    session_id,
-                                    session["generation"],
-                                    role,
-                                    dumps(message),
-                                    raw,
-                                    context_key,
-                                    request_id,
-                                    now,
-                                ),
-                            )
+                    for role, message in [("user", content), ("assistant", text)]:
+                        c.execute(
+                            "INSERT INTO messages(session_id,generation,role,content,raw_output,"
+                            "connection_version,request_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            (
+                                session_id,
+                                session["generation"],
+                                role,
+                                dumps(message),
+                                None,
+                                context_key,
+                                request_id,
+                                now,
+                            ),
+                        )
                     c.execute(
                         "UPDATE requests SET status='completed',finished_at=? WHERE id=?",
                         (now, request_id),
