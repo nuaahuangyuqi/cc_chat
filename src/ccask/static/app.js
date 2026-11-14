@@ -144,10 +144,53 @@ function emptyProject(p) {
   return `<div class="empty-state space-top">${icon("activity")}<h3>准备好接收第一次调用</h3><p>完成项目配置并测试连接后，可从左侧 Python 调用页面查看使用方式。</p><a class="btn secondary" href="#/project/${esc(p.id)}/settings">${icon("settings")}配置项目</a></div>`;
 }
 function codeText(p) {
-  return `from ccask import Ask\n\nwith Ask(\n    project=${JSON.stringify(p.name)},\n    memory=10,\n    session_id="我的会话",\n) as bot:\n    reply = bot.ask("你好，请帮我分析这个问题")\n    print(reply.text)\n\n    # 也可以传入图片\n    reply = bot.ask("分析这张图", images=["figure.png"])\n\n    bot.stop_memory()   # 只发送当前问题，问答仍保存\n    bot.start_memory()  # 恢复最近 10 轮历史\n    bot.clear_memory()  # 清空记忆，保留用量记录`;
+  return `from ccask import Ask\n\nwith Ask(\n    project=${JSON.stringify(p.name)},\n    default_memory=False,  # 支持服务端续接的接口可开启\n    memory=10,\n    session_id="我的会话",\n) as bot:\n    reply = bot.ask("你好，请帮我分析这个问题")\n    print(reply.text)\n\n    # 也可以传入图片\n    reply = bot.ask("分析这张图", images=["figure.png"])\n\n    bot.stop_memory()   # 关闭显式历史，问答仍保存\n    bot.start_memory()  # 恢复最近 10 轮历史\n    bot.clear_memory()  # 删除当前会话及名称，下次提问创建新会话`;
 }
 function codePage(p) {
   return `<div class="code-layout"><div class="code-window"><div class="code-caption"><span class="mono">${esc(p.name)} / quickstart.py</span><button class="btn secondary small" data-action="copy-code" data-id="${esc(p.id)}">${icon("copy")}复制代码</button></div><pre>${esc(codeText(p))}</pre></div><aside class="instruction-box"><h2>调用前，确认这几件事</h2><ul><li>${icon("check")}CC Ask 本地服务已启动。</li><li>${icon("check")}CC Switch 已启用聚合模式。</li><li>${icon("check")}项目模型已选择，并通过连接测试。</li><li>${icon("info")}相同项目名与会话名，可恢复之前的记忆。</li></ul><div class="callout space-top">项目配置保存在网页，Python 只需传入项目名。切换模型或当前账号后，下一次调用自动使用新配置。</div></aside></div>`;
+}
+const effortLabels = {
+  none: "不思考", minimal: "极低", low: "低", medium: "中", high: "高",
+  xhigh: "超高", max: "最大", ultra: "极致",
+};
+function reasoningControl() {
+  const d = state.draft || {};
+  const model = state.models.find((m) => m.id === d.model)
+    || (state.connection?.catalog || []).map(modelView).find((m) => m.id === d.model);
+  const known = Array.isArray(model?.reasoningEfforts);
+  const levels = known ? model.reasoningEfforts : Object.keys(effortLabels);
+  let parameters;
+  try {
+    parameters = JSON.parse(d.parameterText?.trim() || "{}");
+    if (!parameters || Array.isArray(parameters) || typeof parameters !== "object") throw new Error();
+  } catch {
+    return '<label class="field"><span>思考强度</span><select disabled><option>请先修正高级参数 JSON</option></select></label>';
+  }
+  const selected = parameters.reasoning?.effort || "";
+  const options = [...levels];
+  if (selected && !options.includes(selected)) options.unshift(selected);
+  const fallback = model?.defaultReasoningEffort;
+  const note = known
+    ? levels.length ? "按所选模型支持的档位显示。强度越高，通常耗时和用量越多。" : "模型目录未提供可选思考档位，请使用模型默认。"
+    : "模型未声明支持档位，请按供应商说明选择，并测试连接。";
+  return `<label class="field"><span>思考强度</span><select id="draft-reasoning-effort" aria-label="思考强度"><option value="">模型默认${fallback ? "（" + esc(effortLabels[fallback] || fallback) + "）" : ""}</option>${options.map(v => `<option value="${esc(v)}" ${selected === v ? "selected" : ""}>${esc(effortLabels[v] || v)} (${esc(v)})${known && !levels.includes(v) ? " · 当前模型不支持" : ""}</option>`).join("")}</select><small>${note}</small></label>`;
+}
+function setReasoningEffort(value) {
+  const d = state.draft;
+  const parameters = JSON.parse(d.parameterText?.trim() || "{}");
+  const reasoning = parameters.reasoning;
+  if (reasoning !== undefined && (!reasoning || typeof reasoning !== "object" || Array.isArray(reasoning))) {
+    throw new Error("请先将高级参数中的 reasoning 改为 JSON 对象。");
+  }
+  parameters.reasoning = {...(reasoning || {})};
+  if (value) parameters.reasoning.effort = value;
+  else delete parameters.reasoning.effort;
+  if (!Object.keys(parameters.reasoning).length) delete parameters.reasoning;
+  d.parameterText = Object.keys(parameters).length ? JSON.stringify(parameters, null, 2) : "";
+  const textarea = document.querySelector('[data-field="parameterText"]');
+  if (textarea) textarea.value = d.parameterText;
+  invalidateTest();
+  refreshModelPanel();
 }
 function configuration(p = null) {
   const d = state.draft || p || {};
@@ -173,7 +216,7 @@ function configuration(p = null) {
           .join(
             "",
           )}</select><small>供应商、API 地址及密钥统一在 CC Switch 管理。</small>`
-  }</label><div class="provider-summary">${icon("shield")}所有调用都经过 CC Switch 本机代理<span class="badge ${state.connection?.ready ? "success" : "warning"}"><span class="dot"></span>${state.connection?.ready ? "已连接" : "待检查"}</span></div><div style="border-top:1px solid var(--line);margin-top:20px;padding-top:18px"><div class="discovery-meta"><h3 style="font-size:12px">选择模型</h3><button class="btn ghost small" type="button" data-action="discover">${icon("refresh")}重新识别</button></div><div class="model-tools"><label class="search">${icon("search")}<input class="input" id="model-search" placeholder="搜索已识别的模型…" aria-label="搜索模型" value="${esc(state.modelSearch)}"></label><div class="segmented"><button type="button" data-action="capability" data-value="all" class="${state.capability === "all" ? "active" : ""}">全部</button><button type="button" data-action="capability" data-value="vision" class="${state.capability === "vision" ? "active" : ""}">支持图片</button></div></div><div id="models-panel">${modelsPanel()}</div><button type="button" class="manual-model" data-action="manual-model">模型未在列表中？手动填写 ID</button><div class="discovery-caption">${icon("info")}根据所选连接识别模型及能力，切换连接后会重新识别。</div></div></section><section class="form-section"><div class="form-heading"><span class="step-no">03</span><h2>回答要求</h2><span class="muted tiny" style="margin-left:auto">可选</span></div><label class="field"><span>系统提示词</span><textarea id="draft-instructions" data-field="instructions" rows="5" placeholder="例如：你是一名严谨的科研助手，请用清晰、准确的中文回答。">${esc(d.instructions)}</textarea><small>每次调用都会使用，关闭会话记忆时也有效。</small></label><details><summary class="body-color tiny">高级参数</summary><label class="field parameters-field"><span>默认请求参数（JSON）</span><textarea class="mono" data-field="parameterText" rows="5" placeholder='{"temperature": 0.7}'>${esc(d.parameterText)}</textarea><small>支持 temperature、top_p、max_output_tokens、reasoning 和 text。</small></label></details></section><div id="config-error"></div><div class="form-footer"><small id="save-hint">配置更新后，从下一次调用生效。</small><div class="actions"><a class="btn secondary" href="${p ? "#/project/" + p.id : "#/projects"}">取消</a><button class="btn" type="submit" id="save-config">${icon("check")}${p ? "保存更改" : "创建项目"}</button></div></div></form><aside class="config-aside"><div id="test-panel">${testPanel()}</div><div class="config-tip"><h3>${icon("tokens")}测试也有清晰的归属</h3><p>连接测试会先保存当前配置，再发送一次最小请求，验证所选模型能否回答，并计入当前项目用量。</p></div><div class="config-tip"><h3>${icon("shield")}换连接，历史仍在</h3><p>修改 API 或在 CC Switch 切换 GPT 账号后，历史用量按原连接保留，项目内可以分别查看。</p></div></aside></div>`;
+  }</label><div class="provider-summary">${icon("shield")}所有调用都经过 CC Switch 本机代理<span class="badge ${state.connection?.ready ? "success" : "warning"}"><span class="dot"></span>${state.connection?.ready ? "已连接" : "待检查"}</span></div><div style="border-top:1px solid var(--line);margin-top:20px;padding-top:18px"><div class="discovery-meta"><h3 style="font-size:12px">选择模型</h3><button class="btn ghost small" type="button" data-action="discover">${icon("refresh")}重新识别</button></div><div class="model-tools"><label class="search">${icon("search")}<input class="input" id="model-search" placeholder="搜索已识别的模型…" aria-label="搜索模型" value="${esc(state.modelSearch)}"></label><div class="segmented"><button type="button" data-action="capability" data-value="all" class="${state.capability === "all" ? "active" : ""}">全部</button><button type="button" data-action="capability" data-value="vision" class="${state.capability === "vision" ? "active" : ""}">支持图片</button></div></div><div id="models-panel">${modelsPanel()}</div><button type="button" class="manual-model" data-action="manual-model">模型未在列表中？手动填写 ID</button><div class="discovery-caption">${icon("info")}根据所选连接识别模型及能力，切换连接后会重新识别。</div></div></section><section class="form-section"><div class="form-heading"><span class="step-no">03</span><h2>回答要求</h2><span class="muted tiny" style="margin-left:auto">可选</span></div><label class="field"><span>系统提示词</span><textarea id="draft-instructions" data-field="instructions" rows="5" placeholder="例如：你是一名严谨的科研助手，请用清晰、准确的中文回答。">${esc(d.instructions)}</textarea><small>每次调用都会使用，关闭会话记忆时也有效。</small></label><div id="reasoning-control">${reasoningControl()}</div><details><summary class="body-color tiny">高级参数</summary><label class="field parameters-field"><span>默认请求参数（JSON）</span><textarea class="mono" data-field="parameterText" rows="5" placeholder='{"temperature": 0.7}'>${esc(d.parameterText)}</textarea><small>支持 temperature、top_p、max_output_tokens、reasoning 和 text。</small></label></details></section><div id="config-error"></div><div class="form-footer"><small id="save-hint">配置更新后，从下一次调用生效。</small><div class="actions"><a class="btn secondary" href="${p ? "#/project/" + p.id : "#/projects"}">取消</a><button class="btn" type="submit" id="save-config">${icon("check")}${p ? "保存更改" : "创建项目"}</button></div></div></form><aside class="config-aside"><div id="test-panel">${testPanel()}</div><div class="config-tip"><h3>${icon("tokens")}测试也有清晰的归属</h3><p>连接测试会先保存当前配置，再发送一次最小请求，验证所选模型能否回答，并计入当前项目用量。</p></div><div class="config-tip"><h3>${icon("shield")}换连接，历史仍在</h3><p>修改 API 或在 CC Switch 切换 GPT 账号后，历史用量按原连接保留，项目内可以分别查看。</p></div></aside></div>`;
 }
 function modelsPanel() {
   const d = state.draft;
@@ -355,7 +398,7 @@ function pythonPage() {
   return `<div class="python-install"><div class="python-install-heading"><h2>安装本地库</h2><button class="btn secondary small" data-action="copy-install">${icon("copy")}复制安装命令</button></div><p>支持 Python 3.7 及以上版本。在你的 Python 环境中安装后，保持 CC Ask 服务运行。</p><code>${esc(installCommand())}</code></div>${example}${footer()}`;
 }
 function installCommand() {
-  return state.setup?.install_command || `NO_PROXY=127.0.0.1,localhost python -m pip install --upgrade "http://127.0.0.1:8765/api/sdk/${state.setup?.sdk_wheel || "ccask_client-0.1.2-py3-none-any.whl"}"`;
+  return state.setup?.install_command || `NO_PROXY=127.0.0.1,localhost python -m pip install --upgrade "http://127.0.0.1:8765/api/sdk/${state.setup?.sdk_wheel || "ccask_client-0.1.3-py3-none-any.whl"}"`;
 }
 function settingsPage() {
   const config = state.setup?.menubar || {project_ids: [], period: "today"};
@@ -454,6 +497,7 @@ function hydrateIcons() {
   });
 }
 function refreshModelPanel() {
+  if ($("#reasoning-control")) $("#reasoning-control").innerHTML = reasoningControl();
   if ($("#models-panel")) $("#models-panel").innerHTML = modelsPanel();
   if ($("#test-panel")) $("#test-panel").innerHTML = testPanel();
 }
@@ -552,7 +596,9 @@ function modelView(m) {
     id: m.id,
     name: m.label || m.id,
     vision: (m.modalities || []).includes("image"),
-    reasoning: false,
+    reasoning: Boolean(m.reasoning_efforts?.length),
+    reasoningEfforts: m.reasoning_efforts ?? null,
+    defaultReasoningEffort: m.default_reasoning_effort || "",
   };
 }
 function updateProviders(connection) {
@@ -1272,6 +1318,8 @@ document.addEventListener("change", (e) => {
   } else if (n.id === "status-filter") {
     state.status = n.value;
     $("#project-grid").innerHTML = projectCards();
+  } else if (n.id === "draft-reasoning-effort") {
+    try { setReasoningEffort(n.value); } catch (e) { formError(e.message); }
   } else if (n.id === "draft-provider") {
     state.draft.provider = n.value;
     state.draft.model = "";

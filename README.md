@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 为不同项目保存供应商、模型和参数，支持文本、图片和会话记忆。
+- 为不同项目保存供应商、模型、思考强度和参数，支持文本、图片、独立会话与双参数记忆。
 - 按项目查看调用次数、Token、估算费用及调用记录。
 - macOS 菜单栏监控多个项目的用量，未选择项目时显示全局统计。
 - 独立 Python 客户端支持 Python 3.7+；桌面端内置运行环境。
@@ -21,7 +21,7 @@ cc_chat/
 │   ├── packaging/               # PyInstaller 配置与应用图标
 │   ├── scripts/                 # 构建和验证脚本
 │   ├── CC Ask.app/              # 本地构建产物，ZIP 中包含相同应用
-│   └── CC-Ask-0.1.2-macos-arm64.zip
+│   └── CC-Ask-0.1.3-macos-arm64.zip
 ├── tests/                       # 自动化测试
 ├── examples/                    # Python 调用示例
 └── docs/                        # 使用及构建说明
@@ -51,7 +51,7 @@ uv run --frozen python -B -m ccask serve --open
 先打开 App 或网页服务，在自己的 Python 3.7+ 环境安装客户端：
 
 ```sh
-NO_PROXY=127.0.0.1,localhost python -m pip install --upgrade "http://127.0.0.1:8765/api/sdk/ccask_client-0.1.2-py3-none-any.whl"
+NO_PROXY=127.0.0.1,localhost python -m pip install --upgrade "http://127.0.0.1:8765/api/sdk/ccask_client-0.1.3-py3-none-any.whl"
 ```
 
 网页 Python 调用页提供安装命令和示例代码的复制按钮。
@@ -59,17 +59,17 @@ NO_PROXY=127.0.0.1,localhost python -m pip install --upgrade "http://127.0.0.1:8
 ```python
 from ccask import Ask
 
-with Ask("你的项目名", memory=10, session_id="日常会话") as bot:
+with Ask("你的项目名", default_memory=False, memory=10, session_id="日常会话") as bot:
     print(bot.ask("你好").text)
     bot.set_memory(3)  # 改为最近 3 轮
     bot.stop_memory()
     bot.start_memory()
-    bot.clear_memory()
+    bot.clear_memory()  # 同时删除当前会话名称
 ```
 
-默认 `memory=0`，只发送当前问题；`memory=10` 带入当前问题之前最近 10 轮完整问答。成功问答都会保存在本地数据库，关闭记忆也会保存。固定 `session_id` 可跨进程继续使用历史。
+默认 `default_memory=False, memory=0`，每次独立回答。`memory=10` 显式带入当前会话最近 10 轮；在支持服务端续接的接口上，可用 `default_memory=True, memory=0` 连续对话。成功问答会保存在本地，不同 `session_id` 隔离。`clear_memory()` 同时删除会话及名称，`clear_sessions(project="项目名")` 可批量清除。项目配置页可直接选择模型的思考强度。
 
-完整参数、图片、记忆控制、异常处理和升级说明见 [Python 客户端使用说明](docs/python-client.md)。升级时先更新 App 或本地服务到 0.1.2，再安装新版客户端。
+完整参数、图片、记忆控制、异常处理和升级说明见 [Python 客户端使用说明](docs/python-client.md)。升级时先更新 App 或本地服务到 0.1.3，再安装新版客户端。
 
 ## Mac 构建
 

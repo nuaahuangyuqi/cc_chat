@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 from .auth import CodexAuth
 from .ccswitch import CCSwitch
-from .client import image_content, normalize_memory
+from .client import image_content, normalize_default_memory, normalize_memory
 from .config import Settings
 from .db import Database, dumps, uid
 from .errors import CCAskError
@@ -73,23 +73,34 @@ class ConversationService:
         self.transport = transport or ProxyTransport(settings.timeout)
         self.locks = SessionLocks()
 
-    async def set_memory(self, session_id, memory):
-        memory = normalize_memory(memory)
+    async def set_memory(self, session_id, memory=None, default_memory=None):
+        if memory is not None:
+            memory = normalize_memory(memory)
+        if default_memory is not None:
+            default_memory = normalize_default_memory(default_memory)
         async with self.locks.hold(session_id):
-            self.db.get_session(session_id)
+            session = self.db.get_session(session_id)
+            memory = session["memory_rounds"] if memory is None else memory
+            native = session["default_memory"] if default_memory is None else int(default_memory)
+            changed = session["memory_rounds"] != memory or session["default_memory"] != native
             self.db.execute(
-                "UPDATE sessions SET memory_enabled=?,memory_rounds=? WHERE id=?",
-                (int(memory > 0), memory, session_id),
+                "UPDATE sessions SET memory_enabled=?,memory_rounds=?,default_memory=?,"
+                "response_id=CASE WHEN ? THEN NULL ELSE response_id END,"
+                "response_context=CASE WHEN ? THEN NULL ELSE response_context END WHERE id=?",
+                (int(memory > 0), memory, native, changed, changed, session_id),
             )
-            return {"memory_enabled": memory > 0, "memory_rounds": memory}
+            return {
+                "memory_enabled": memory > 0, "memory_rounds": memory,
+                "default_memory": bool(native),
+            }
 
     async def clear(self, session_id):
         async with self.locks.hold(session_id):
-            self.db.get_session(session_id)
-            with self.db.connect() as c:
-                c.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
-                c.execute("UPDATE sessions SET generation=generation+1 WHERE id=?", (session_id,))
-            return {"cleared": True}
+            return self.db.delete_sessions(session_id=session_id)
+
+    async def clear_sessions(self, project=None, *, all_projects=False):
+        # Synchronous transaction: rejects running calls before deleting anything.
+        return self.db.delete_sessions(project, all_projects=all_projects)
 
     async def ask(self, session_id, content):
         content = validate_content(content)
@@ -145,7 +156,12 @@ class ConversationService:
                     ).encode()
                 ).hexdigest()
                 history = []
-                if session["memory_rounds"]:
+                native = bool(session["default_memory"])
+                previous = (
+                    session["response_id"]
+                    if native and session["response_context"] == context_key else None
+                )
+                if session["memory_rounds"] and not previous:
                     # Successful rounds are committed as pairs in one transaction. Fetch
                     # the newest N pairs, then restore chronological order. Replay only
                     # visible messages: opaque reasoning may carry older state outside
@@ -166,12 +182,14 @@ class ConversationService:
                     "model": wire_model,
                     "input": history,
                     "instructions": project["instructions"],
-                    "store": False,
+                    "store": native,
                     "stream": True,
                     "prompt_cache_key": hashlib.sha256(
                         (session_id + context_key).encode()
                     ).hexdigest(),
                 }
+                if previous:
+                    body["previous_response_id"] = previous
                 output = await self.transport.generate(state["base_url"], body, headers)
                 parts = [
                     p
@@ -187,8 +205,18 @@ class ConversationService:
                 )
                 if not text:
                     raise CCAskError("模型没有返回文字回答。", "empty_response", 502)
+                response_id = output.get("id") if native else None
+                if native and (not isinstance(response_id, str) or not response_id):
+                    raise CCAskError(
+                        "当前供应商没有返回会话续接标识，请关闭 default_memory 或更换支持续接的接口。",
+                        "native_memory_unsupported", 502,
+                    )
                 now = time.time()
                 with self.db.connect() as c:
+                    c.execute(
+                        "UPDATE sessions SET response_id=?,response_context=? WHERE id=?",
+                        (response_id, context_key if native else None, session_id),
+                    )
                     for role, message in [("user", content), ("assistant", text)]:
                         c.execute(
                             "INSERT INTO messages(session_id,generation,role,content,raw_output,"

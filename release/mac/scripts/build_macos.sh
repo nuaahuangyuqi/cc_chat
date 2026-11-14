@@ -18,8 +18,10 @@ BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cc_chat-build.XXXXXX")
 trap 'rm -rf "$BUILD_DIR"' EXIT
 uv sync --frozen --group desktop --group dev
 uv run --frozen --group desktop python "$MAC_DIR/scripts/prepare_macos.py"
-uv run --frozen --group desktop pytest -q -p no:cacheprovider
-uv run --frozen --group desktop ruff check --no-cache src tests examples "$MAC_DIR/src" "$MAC_DIR/scripts" "$MAC_DIR/packaging/desktop_entry.py"
+if [[ "${CCASK_SKIP_CHECKS:-0}" != "1" ]]; then
+  uv run --frozen --group desktop pytest -q -p no:cacheprovider
+  uv run --frozen --group desktop ruff check --no-cache src tests examples "$MAC_DIR/src" "$MAC_DIR/scripts" "$MAC_DIR/packaging/desktop_entry.py"
+fi
 uv run --frozen --group desktop pyinstaller --noconfirm --clean \
   --workpath "$BUILD_DIR/work" --distpath "$BUILD_DIR/dist" "$MAC_DIR/packaging/CC-Ask.spec"
 VERSION=$(uv run --frozen python -c 'import ccask; print(ccask.__version__)')

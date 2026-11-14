@@ -144,6 +144,7 @@ def env(tmp_path):
                 ),
             )
         result = completion("answer-" + str(len(calls)), reasoning=True)
+        result["id"] = "resp-test-" + str(len(calls))
         sse = 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
         sse += "data: " + json.dumps({"type": "response.completed", "response": result}) + "\n\n"
         return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, text=sse)

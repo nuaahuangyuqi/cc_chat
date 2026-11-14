@@ -51,6 +51,4 @@ files[f"{info}/RECORD"] = records.getvalue().encode()
 with zipfile.ZipFile(sdk / SDK_WHEEL, "w", zipfile.ZIP_DEFLATED) as wheel:
     for path, data in files.items():
         wheel.writestr(path, data)
-for stale in sdk.glob("ccask_client-*.whl"):
-    if stale.name != SDK_WHEEL:
-        stale.unlink()
+# Keep older wheels available for existing installations and historical downloads.

@@ -40,6 +40,12 @@ def normalize_memory(memory):
     return memory
 
 
+def normalize_default_memory(enabled):
+    if not isinstance(enabled, bool):
+        raise CCAskError("default_memory 须为 True 或 False。", "invalid_default_memory")
+    return enabled
+
+
 @dataclass(frozen=True)
 class Reply:
     text: str
@@ -50,46 +56,13 @@ class Reply:
         return self.text
 
 
-class Ask:
-    """A synchronous, persistent conversation using a project configured in CC Ask."""
-
-    def __init__(
-        self,
-        project: str,
-        memory: int = 0,
-        session_id: Optional[str] = None,
-        *,
-        base_url: Optional[str] = None,
-        timeout: float = 240,
-    ):
-        memory = normalize_memory(memory)
-        self._resume_memory = memory or DEFAULT_MEMORY_ROUNDS
+class _ServiceClient:
+    def __init__(self, base_url=None, timeout=240):
         self.base_url = base_url or os.environ.get("CCASK_URL", "http://127.0.0.1:8765")
         u = urlparse(self.base_url)
         if u.scheme != "http" or u.hostname not in {"127.0.0.1", "localhost", "::1"}:
-            raise CCAskError("CC Ask 第一版仅连接本机 HTTP 服务。", "invalid_service_url")
+            raise CCAskError("CC Ask 仅连接本机 HTTP 服务。", "invalid_service_url")
         self._http = httpx.Client(base_url=self.base_url, timeout=timeout, trust_env=False)
-        try:
-            state = self._call(
-                "POST",
-                "/api/sessions",
-                json={
-                    "project": project,
-                    "memory": memory,
-                    "session_id": session_id,
-                },
-            )
-            self._id = state["id"]
-            self.session_id = state["name"]
-            self.memory = memory
-            if "memory_rounds" not in state:
-                raise CCAskError(
-                    "请先将 CC Ask App 或本地服务升级到 0.1.2，再使用新版客户端。",
-                    "service_upgrade_required",
-                )
-        except BaseException:
-            self._http.close()
-            raise
 
     def _call(self, method, path, **kwargs):
         try:
@@ -112,32 +85,6 @@ class Ask:
             raise CCAskError(message, code, response.status_code)
         return response.json()
 
-    def ask(self, text: str, images=None) -> Reply:
-        content = [{"type": "input_text", "text": text}]
-        content.extend(image_content(i) for i in (images or []))
-        return Reply(
-            **self._call("POST", f"/api/sessions/{self._id}/ask", json={"content": content})
-        )
-
-    def set_memory(self, memory: int):
-        """Set the number of recent completed rounds included in each request."""
-        memory = normalize_memory(memory)
-        self._call("PUT", f"/api/sessions/{self._id}/memory", json={"memory": memory})
-        self.memory = memory
-        if memory:
-            self._resume_memory = memory
-
-    def start_memory(self, rounds: Optional[int] = None):
-        """Resume the last positive window (10 initially), or choose a new window."""
-        self.set_memory(self._resume_memory if rounds is None else rounds)
-
-    def stop_memory(self):
-        """Send only the current question; successful rounds are still saved."""
-        self.set_memory(0)
-
-    def clear_memory(self):
-        self._call("POST", f"/api/sessions/{self._id}/clear")
-
     def close(self):
         self._http.close()
 
@@ -146,3 +93,105 @@ class Ask:
 
     def __exit__(self, *args):
         self.close()
+
+
+def clear_sessions(project=None, *, all_projects=False, base_url=None, timeout=240):
+    """Delete all sessions in one project or explicitly across all projects."""
+    normalize_default_memory(all_projects)
+    if (project is not None) == all_projects:
+        raise CCAskError("请指定 project，或设置 all_projects=True。", "invalid_clear_scope")
+    if project is not None and (not isinstance(project, str) or not project.strip()):
+        raise CCAskError("project 须为项目名称或 ID。", "invalid_clear_scope")
+    with _ServiceClient(base_url, timeout) as client:
+        return client._call(
+            "POST", "/api/sessions/clear", json={"project": project, "all_projects": all_projects}
+        )
+
+
+class Ask(_ServiceClient):
+    """A synchronous conversation with independent native and explicit history controls."""
+
+    def __init__(
+        self,
+        project: str,
+        memory: int = 0,
+        session_id: Optional[str] = None,
+        *,
+        default_memory: bool = False,
+        base_url: Optional[str] = None,
+        timeout: float = 240,
+    ):
+        self.memory = normalize_memory(memory)
+        self.default_memory = normalize_default_memory(default_memory)
+        self._resume_memory = self.memory or DEFAULT_MEMORY_ROUNDS
+        self._project = project
+        self._id = None
+        self.session_id = session_id
+        super().__init__(base_url, timeout)
+        try:
+            self._ensure_session()
+        except BaseException:
+            self.close()
+            raise
+
+    def _ensure_session(self):
+        if self._id is not None:
+            return
+        state = self._call(
+            "POST", "/api/sessions",
+            json={
+                "project": self._project, "memory": self.memory,
+                "default_memory": self.default_memory, "session_id": self.session_id,
+            },
+        )
+        if "default_memory" not in state:
+            raise CCAskError(
+                "请先将 CC Ask App 或本地服务升级到 0.1.3，再使用新版客户端。",
+                "service_upgrade_required",
+            )
+        self._id = state["id"]
+        self.session_id = state["name"]
+        self._project = state["project_id"]
+
+    def ask(self, text: str, images=None) -> Reply:
+        content = [{"type": "input_text", "text": text}]
+        content.extend(image_content(i) for i in (images or []))
+        self._ensure_session()
+        return Reply(
+            **self._call("POST", f"/api/sessions/{self._id}/ask", json={"content": content})
+        )
+
+    def set_memory(self, memory: int):
+        """Set explicit history rounds; resets a native chain when the value changes."""
+        memory = normalize_memory(memory)
+        if self._id is not None:
+            self._call("PUT", f"/api/sessions/{self._id}/memory", json={"memory": memory})
+        self.memory = memory
+        if memory:
+            self._resume_memory = memory
+
+    def set_default_memory(self, enabled: bool):
+        """Enable or disable server-managed conversation continuation."""
+        enabled = normalize_default_memory(enabled)
+        if self._id is not None:
+            self._call(
+                "PUT", f"/api/sessions/{self._id}/memory", json={"default_memory": enabled}
+            )
+        self.default_memory = enabled
+
+    def start_memory(self, rounds: Optional[int] = None):
+        """Resume the last positive explicit window (10 initially), or choose its size."""
+        self.set_memory(self._resume_memory if rounds is None else rounds)
+
+    def stop_memory(self):
+        """Disable explicit history; default_memory is controlled separately."""
+        self.set_memory(0)
+
+    def clear_memory(self):
+        """Delete this session and name; the next ask creates an unnamed new session."""
+        result = {"cleared": True, "deleted_sessions": 0}
+        if self._id is not None:
+            result = self._call("POST", f"/api/sessions/{self._id}/clear")
+        self._id = None
+        self.session_id = None
+        return result

@@ -141,6 +141,13 @@ class CCSwitch:
                             "id": name,
                             "label": entry.get("display_name") or name,
                             "modalities": entry.get("input_modalities", []),
+                            "reasoning_efforts": (
+                                [level["effort"] for level in entry["supported_reasoning_levels"]
+                                 if isinstance(level, dict) and isinstance(level.get("effort"), str)]
+                                if isinstance(entry.get("supported_reasoning_levels"), list)
+                                else None
+                            ),
+                            "default_reasoning_effort": entry.get("default_reasoning_level"),
                         }
                     )
             if models:
@@ -171,7 +178,8 @@ class CCSwitch:
             default = toml(p["config"].get("config", "")).get("model")
             if default and not is_official:
                 mid = f"ccs-{key}/{default}" if key else default
-                models.append({"id": mid, "label": default, "modalities": []})
+                if not any(m["id"] == mid for m in models):
+                    models.append({"id": mid, "label": default, "modalities": []})
             providers.append(
                 {
                     "id": p["id"],

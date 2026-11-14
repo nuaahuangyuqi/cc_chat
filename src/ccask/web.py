@@ -63,6 +63,10 @@ class ProjectDraft(BaseModel):
             r = self.parameters["reasoning"]
             if not isinstance(r, dict) or set(r) - {"effort", "summary"}:
                 raise ValueError("reasoning 参数无效")
+            if "effort" in r and r["effort"] not in (
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+            ):
+                raise ValueError("思考强度无效，请选择模型支持的档位。")
         if "text" in self.parameters:
             r = self.parameters["text"]
             if not isinstance(r, dict) or set(r) - {"verbosity"}:
@@ -84,12 +88,36 @@ class MemoryWindow(BaseModel):
 
 class SessionDraft(MemoryWindow):
     project: str = Field(min_length=1, max_length=200)
+    default_memory: bool = Field(default=False, strict=True)
     session_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class MemoryDraft(MemoryWindow):
-    # Accept old clients' {"enabled": true}, but always use a bounded window.
-    memory: int = Field(ge=0, le=2**31 - 1, validation_alias=AliasChoices("memory", "enabled"))
+    memory: int | None = Field(
+        default=None, ge=0, le=2**31 - 1, validation_alias=AliasChoices("memory", "enabled")
+    )
+    default_memory: bool | None = Field(default=None, strict=True)
+
+    @model_validator(mode="after")
+    def validate_changes(self):
+        if not self.model_fields_set or any(
+            getattr(self, key) is None for key in self.model_fields_set
+        ):
+            raise ValueError("请提供 memory 或 default_memory 的有效值。")
+        return self
+
+
+class ClearSessionsDraft(BaseModel):
+    project: str | None = Field(default=None, min_length=1, max_length=200)
+    all_projects: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        if (self.project is not None) == self.all_projects:
+            raise ValueError("请指定 project，或设置 all_projects=True。")
+        if self.project is not None and not self.project.strip():
+            raise ValueError("项目不能为空。")
+        return self
 
 
 class RuntimeDraft(BaseModel):
@@ -225,6 +253,17 @@ def create_app(settings=None, service=None):
         return [db.decode_project(r) for r in db.rows(sql + " ORDER BY created_at DESC")]
 
     def check_provider(draft):
+        effort = draft.parameters.get("reasoning", {}).get("effort")
+        if effort:
+            model = next((m for m in service.cc.catalog() if m["id"] == draft.model), None)
+            if (
+                model is not None and model.get("reasoning_efforts") is not None
+                and effort not in model["reasoning_efforts"]
+            ):
+                raise CCAskError(
+                    "所选模型不支持这个思考强度，请选择其支持的档位或使用模型默认。",
+                    "invalid_reasoning_effort",
+                )
         if draft.mode == "api":
             state = service.cc.state()
             if not any(p["id"] == draft.provider_id for p in state["providers"]):
@@ -263,14 +302,18 @@ def create_app(settings=None, service=None):
 
     @app.post("/api/sessions", status_code=201)
     async def create_session(draft: SessionDraft):
-        result = db.session(draft.project, draft.session_id, draft.memory)
+        result = db.session(draft.project, draft.session_id, draft.memory, draft.default_memory)
         # Initialization and memory mutations use the same queue as model calls.
-        await service.set_memory(result["id"], draft.memory)
+        await service.set_memory(result["id"], draft.memory, draft.default_memory)
         return db.get_session(result["id"])
+
+    @app.post("/api/sessions/clear")
+    async def clear_sessions(draft: ClearSessionsDraft):
+        return await service.clear_sessions(draft.project, all_projects=draft.all_projects)
 
     @app.put("/api/sessions/{session_id}/memory")
     async def memory(session_id: str, draft: MemoryDraft):
-        return await service.set_memory(session_id, draft.memory)
+        return await service.set_memory(session_id, draft.memory, draft.default_memory)
 
     @app.post("/api/sessions/{session_id}/clear")
     async def clear(session_id: str):

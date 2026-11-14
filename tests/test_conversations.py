@@ -31,10 +31,12 @@ async def test_memory_pause_resume_clear_and_restart(env):
     assert restored["id"] == sid
     request_count = len(env.db.rows("SELECT * FROM requests"))
     await s.clear(sid)
-    assert env.db.get_session(sid)["memory_enabled"] == 1
+    assert env.db.one("SELECT * FROM sessions WHERE id=?", (sid,)) is None
     assert not env.db.rows("SELECT * FROM messages")
     assert len(env.db.rows("SELECT * FROM requests")) == request_count
-    await s.ask(sid, content("fresh"))
+    fresh = env.db.session("研究", "experiment", 10)
+    assert fresh["id"] != sid
+    await s.ask(fresh["id"], content("fresh"))
     assert len(env.calls[-1]["body"]["input"]) == 1
 
 
@@ -214,8 +216,9 @@ async def test_memory_window_rolls_forward_and_can_read_saved_independent_rounds
     reopened = Database(env.settings.db_path)
     assert reopened.get_session(sid)["memory_rounds"] == 2
     await env.service.clear(sid)
-    assert env.db.get_session(sid)["memory_rounds"] == 2
-    await env.service.ask(sid, content("fresh"))
+    assert env.db.one("SELECT * FROM sessions WHERE id=?", (sid,)) is None
+    fresh = env.db.session("研究", "experiment", 2)
+    await env.service.ask(fresh["id"], content("fresh"))
     assert len(env.calls[-1]["body"]["input"]) == 1
 
 
@@ -250,7 +253,14 @@ def test_memory_migration_preserves_history_and_is_idempotent(env):
     with sqlite3.connect(path) as c:
         from ccask.db import SCHEMA
 
-        c.executescript(SCHEMA.replace(" memory_rounds INTEGER NOT NULL DEFAULT 0,\n", ""))
+        legacy_schema = SCHEMA
+        for line in (
+            " memory_rounds INTEGER NOT NULL DEFAULT 0,\n",
+            " default_memory INTEGER NOT NULL DEFAULT 0,\n",
+            " response_id TEXT, response_context TEXT,\n",
+        ):
+            legacy_schema = legacy_schema.replace(line, "")
+        c.executescript(legacy_schema)
         c.execute("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT ''")
         c.execute(
             "INSERT INTO projects(id,name,mode,model,created_at,updated_at) "

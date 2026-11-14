@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
-from .client import normalize_memory
+from .client import normalize_default_memory, normalize_memory
 from .errors import CCAskError
 
 
@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS sessions (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL,
  memory_enabled INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0,
  memory_rounds INTEGER NOT NULL DEFAULT 0,
+ default_memory INTEGER NOT NULL DEFAULT 0,
+ response_id TEXT, response_context TEXT,
  created_at REAL NOT NULL, UNIQUE(project_id,name)
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -72,7 +74,10 @@ class Database:
                 columns = {r[1] for r in source.execute("PRAGMA table_info(projects)")}
                 sessions = {r[1] for r in source.execute("PRAGMA table_info(sessions)")}
                 if columns and (
-                    "description" not in columns or (sessions and "memory_rounds" not in sessions)
+                    "description" not in columns
+                    or (sessions and not {
+                        "memory_rounds", "default_memory", "response_id", "response_context"
+                    } <= sessions)
                 ):
                     backup_dir = path.parent / "backups"
                     backup_dir.mkdir(exist_ok=True, mode=0o700)
@@ -90,6 +95,13 @@ class Database:
             if "memory_rounds" not in columns:
                 c.execute("ALTER TABLE sessions ADD COLUMN memory_rounds INTEGER NOT NULL DEFAULT 0")
                 c.execute("UPDATE sessions SET memory_rounds=10 WHERE memory_enabled=1")
+            for column, definition in [
+                ("default_memory", "INTEGER NOT NULL DEFAULT 0"),
+                ("response_id", "TEXT"),
+                ("response_context", "TEXT"),
+            ]:
+                if column not in columns:
+                    c.execute(f"ALTER TABLE sessions ADD COLUMN {column} {definition}")
             c.execute(
                 "INSERT OR IGNORE INTO metadata VALUES ('fingerprint_salt', ?)",
                 (secrets.token_hex(32),),
@@ -186,16 +198,17 @@ class Database:
             raise CCAskError("项目名已经存在。", "project_name_exists", 409) from exc
         return self.project(project_id)
 
-    def session(self, project: str, name: str | None, memory: int = 0):
+    def session(self, project: str, name: str | None, memory: int = 0, default_memory: bool = False):
         memory = normalize_memory(memory)
+        default_memory = normalize_default_memory(default_memory)
         p = self.project(project)
         name = name or uid()
         with self.connect() as c:
             c.execute(
                 "INSERT OR IGNORE INTO sessions"
-                "(id,project_id,name,memory_enabled,generation,memory_rounds,created_at) "
-                "VALUES (?,?,?,?,0,?,?)",
-                (uid(), p["id"], name, int(memory > 0), memory, time.time()),
+                "(id,project_id,name,memory_enabled,generation,memory_rounds,default_memory,created_at) "
+                "VALUES (?,?,?,?,0,?,?,?)",
+                (uid(), p["id"], name, int(memory > 0), memory, int(default_memory), time.time()),
             )
             row = dict(
                 c.execute(
@@ -243,6 +256,36 @@ class Database:
                     (connection[0],),
                 )
         return {"deleted": True}
+
+    def delete_sessions(self, project=None, *, session_id=None, all_projects=False):
+        """Delete sessions atomically, retaining usage and detached request records."""
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if session_id is not None:
+                condition, args = "id=?", (session_id,)
+            elif all_projects:
+                condition, args = "1=1", ()
+            else:
+                row = c.execute(
+                    "SELECT id FROM projects WHERE id=? OR (name=? AND archived=0)",
+                    (project, project),
+                ).fetchone()
+                if not row:
+                    raise CCAskError("项目不存在。", "project_not_found", 404)
+                condition, args = "project_id=?", (row["id"],)
+            selected = f"SELECT id FROM sessions WHERE {condition}"
+            if c.execute(
+                f"SELECT 1 FROM requests WHERE session_id IN ({selected}) "
+                "AND status='running' LIMIT 1", args,
+            ).fetchone():
+                raise CCAskError(
+                    "会话还有正在进行的调用，请等调用结束后再清除。", "sessions_busy", 409
+                )
+            count = c.execute(f"SELECT COUNT(*) FROM sessions WHERE {condition}", args).fetchone()[0]
+            c.execute(f"DELETE FROM messages WHERE session_id IN ({selected})", args)
+            c.execute(f"UPDATE requests SET session_id='' WHERE session_id IN ({selected})", args)
+            c.execute(f"DELETE FROM sessions WHERE {condition}", args)
+        return {"cleared": True, "deleted_sessions": count}
 
     def get_session(self, session_id: str):
         s = self.one("SELECT * FROM sessions WHERE id=?", (session_id,))

@@ -43,7 +43,7 @@ class ProxyTransport:
                                 "upstream_rate_limited",
                                 429,
                             )
-                        if code == 400:
+                        if code in (400, 404, 405, 422, 501):
                             raw = bytearray()
                             async for chunk in response.aiter_bytes():
                                 raw.extend(chunk[: max(0, 8192 - len(raw))])
@@ -53,12 +53,7 @@ class ProxyTransport:
                                 error = json.loads(raw).get("error", {})
                             except (ValueError, AttributeError):
                                 error = {}
-                            if isinstance(error, dict) and error.get("code") == "model_not_found":
-                                raise CCAskError(
-                                    "当前账号或供应商不支持所选模型，请刷新连接并重新选择模型。",
-                                    "model_unavailable",
-                                    400,
-                                )
+                            self.check_error(error, body, code)
                         raise CCAskError(
                             f"CC Switch 返回 HTTP {code}，请查看其请求日志。", "upstream_error", 502
                         )
@@ -71,18 +66,18 @@ class ProxyTransport:
                             result = json.loads(raw)
                         except ValueError as exc:
                             raise CCAskError("代理响应格式异常。", "invalid_response", 502) from exc
-                        return self.complete(result)
+                        return self.complete(result, body)
                     event_lines = []
                     async for line in response.aiter_lines():
                         if line == "":
-                            result = self.event(event_lines)
+                            result = self.event(event_lines, body)
                             event_lines = []
                             if result is not None:
                                 return result
                         elif line.startswith("data:"):
                             event_lines.append(line[5:].lstrip(" "))
                     if event_lines:
-                        result = self.event(event_lines)
+                        result = self.event(event_lines, body)
                         if result is not None:
                             return result
                     raise CCAskError("模型响应在完成前中断，请重试。", "stream_interrupted", 502)
@@ -97,7 +92,7 @@ class ProxyTransport:
                 503,
             ) from exc
 
-    def event(self, lines):
+    def event(self, lines, body=None):
         data = "\n".join(lines)
         if not data or data == "[DONE]":
             return None
@@ -107,17 +102,65 @@ class ProxyTransport:
             raise CCAskError("模型流式响应格式异常。", "invalid_response", 502) from exc
         kind = event.get("type")
         if kind == "response.completed":
-            return self.complete(event.get("response", {}))
+            return self.complete(event.get("response", {}), body)
         if kind in {"error", "response.failed", "response.incomplete", "response.cancelled"}:
+            self.check_error(
+                event.get("response", {}).get("error") or event.get("error") or event,
+                body or {},
+            )
             raise CCAskError(
                 "模型未能完整回答，请查看 CC Switch 请求日志。", "incomplete_response", 502
             )
         return None
 
     @staticmethod
-    def complete(result):
+    def complete(result, body=None):
+        ProxyTransport.check_error(result.get("error"), body or {})
+        if body and body.get("store") and result.get("store") is False:
+            ProxyTransport.unsupported_memory()
         if result.get("error") or result.get("status") not in ("completed",):
             raise CCAskError("模型未返回完整回答。", "incomplete_response", 502)
         if not isinstance(result.get("output"), list):
             raise CCAskError("模型响应缺少输出内容。", "invalid_response", 502)
         return result
+
+    @staticmethod
+    def unsupported_memory():
+        raise CCAskError(
+            "当前代理或供应商不支持服务端会话续接，请设置 default_memory=False，"
+            "使用 memory 指定历史轮数，或更换支持 store/previous_response_id 的接口。",
+            "native_memory_unsupported", 400,
+        )
+
+    @staticmethod
+    def check_error(error, body, status=None):
+        # Inspect bounded error fields for classification; never expose upstream text.
+        error = error if isinstance(error, dict) else {}
+        code = str(error.get("code", "")).lower()
+        param = str(error.get("param", "")).lower()
+        message = str(error.get("message", "")).lower()
+        if code == "model_not_found":
+            raise CCAskError(
+                "当前账号或供应商不支持所选模型，请刷新连接并重新选择模型。",
+                "model_unavailable", 400,
+            )
+        if not body.get("store"):
+            return
+        unsupported = any(s in message for s in (
+            "unsupported", "not supported", "unknown parameter", "unrecognized", "must be", "not allowed"
+        ))
+        related = any(s in param + message for s in ("store", "previous_response", "conversation"))
+        if related and (unsupported or code in {"unsupported_parameter", "unknown_parameter"}):
+            ProxyTransport.unsupported_memory()
+        if body.get("previous_response_id") and (
+            status == 404 or code in {"previous_response_not_found", "response_not_found"}
+            or "previous_response" in param + message and any(
+                s in message for s in ("not found", "expired", "does not exist", "invalid")
+            )
+        ):
+            raise CCAskError(
+                "服务端会话已过期或不可用，请清空当前会话后重新开始。",
+                "native_memory_expired", 409,
+            )
+        if status in (404, 405, 501):
+            ProxyTransport.unsupported_memory()

@@ -50,7 +50,7 @@ with Ask(project="论文助手", memory=10, session_id="实验设计") as bot:
     print(bot.ask("建议三个实验方向").text)
 ```
 
-默认 `memory=0`；传入 `memory=10` 时带入最近 10 轮历史。完整用法见 [Python 客户端使用说明](python-client.md)。
+默认两个记忆开关为 `default_memory=False, memory=0`；`memory=10` 带入最近 10 轮，支持续接的接口可设置 `default_memory=True`。`clear_memory()` 同时删除会话及名称。项目设置可选择“思考强度”。完整用法见 [Python 客户端使用说明](python-client.md)。
 
 可使用 `uv run python -B examples/basic.py` 运行源码示例。桌面版及其他 Python 项目的客户端安装方式见 [macOS 说明](macos.md)。
 
